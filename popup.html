@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>My Video Downloader</title>
+    <style>
+      :root {
+        --bg: #0f1117;
+        --panel: #171a23;
+        --border: #262a36;
+        --text: #e6e8ee;
+        --muted: #9aa0ad;
+        --accent: #4f46e5;
+        --accent-hover: #6366f1;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        width: 360px;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 13px;
+      }
+      header {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+      header .count { color: var(--muted); font-size: 12px; }
+      #list { max-height: 380px; overflow-y: auto; padding: 8px; }
+      .empty { color: var(--muted); text-align: center; padding: 28px 16px; line-height: 1.5; }
+      .item {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px;
+        margin-bottom: 8px;
+      }
+      .item .fname {
+        width: 100%;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text);
+        font-size: 12px;
+        padding: 6px 8px;
+        margin-bottom: 6px;
+        font-family: inherit;
+      }
+      .item .fname:focus { outline: none; border-color: var(--accent); }
+      .item .meta {
+        color: var(--muted);
+        font-size: 11px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+      }
+      .rec {
+        background: #1f5b45;
+        color: #6ee7b7;
+        border-radius: 4px;
+        padding: 1px 6px;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .04em;
+      }
+      .tag {
+        text-transform: uppercase;
+        letter-spacing: .04em;
+        background: #21263400;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 1px 5px;
+      }
+      .tag.hls { color: #f0abfc; border-color: #6b2a6e; }
+      .tag.file { color: #6ee7b7; border-color: #1f5b45; }
+      button {
+        width: 100%;
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 6px;
+        padding: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover { background: var(--accent-hover); }
+      button:disabled { opacity: .6; cursor: default; }
+      .status { font-size: 11px; color: var(--muted); margin-top: 6px; min-height: 14px; word-break: break-word; }
+      .status.ok { color: #6ee7b7; }
+      .status.err { color: #fca5a5; }
+      .bar {
+        height: 4px;
+        background: var(--border);
+        border-radius: 2px;
+        margin-top: 6px;
+        overflow: hidden;
+        display: none;
+      }
+      .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+      .bar.mux > div { background: #f59e0b; }
+      .actions { display: flex; gap: 6px; }
+      .actions .cancel {
+        width: auto;
+        flex: 0 0 auto;
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--muted);
+        font-weight: 500;
+        display: none;
+      }
+      .actions .cancel:hover { background: var(--panel); color: var(--text); }
+      .details { font-size: 10px; color: var(--muted); margin-top: 4px; }
+      .details summary { cursor: pointer; }
+      .details div { margin-top: 4px; font-family: ui-monospace, Menlo, monospace; word-break: break-all; max-height: 90px; overflow-y: auto; }
+      .tag.earlier { color: var(--muted); }
+      .toggle {
+        background: transparent;
+        color: var(--muted);
+        border: 1px dashed var(--border);
+        font-weight: 500;
+        margin: 4px 0 8px;
+      }
+      .toggle:hover { background: var(--panel); color: var(--text); }
+      .controls {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 8px 14px;
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .controls select,
+      .controls input {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 4px 6px;
+        font-size: 12px;
+        font-family: inherit;
+      }
+      .controls input { width: 190px; }
+      .controls input:focus, .controls select:focus { outline: none; border-color: var(--accent); }
+      footer {
+        padding: 8px 14px;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.4;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>My Video Downloader <span id="ver" style="font-weight:400;color:var(--muted);font-size:11px"></span></h1>
+      <span class="count" id="count"></span>
+    </header>
+    <div class="controls">
+      <span>Quality</span>
+      <select id="quality">
+        <option value="highest">Highest</option>
+        <option value="1080">1080p</option>
+        <option value="720">720p</option>
+        <option value="480">480p</option>
+        <option value="lowest">Smallest</option>
+      </select>
+    </div>
+    <div class="controls">
+      <span>Ask where to save<br /><span style="font-size:10px">remembers your last folder</span></span>
+      <input id="ask" type="checkbox" />
+    </div>
+    <div class="controls" id="folderRow">
+      <span>Folder</span>
+      <input id="folder" type="text" placeholder="Downloads (auto)" spellcheck="false" />
+    </div>
+    <div id="list">
+      <div class="empty">Scanning this tab…</div>
+    </div>
+    <footer>
+      Only download content you own or have permission to save. Respect each
+      site's terms of service and copyright.
+    </footer>
+    <script src="popup.js"></script>
+  </body>
+</html>

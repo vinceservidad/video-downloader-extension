@@ -1,0 +1,25 @@
+const { createWorld } = require('./sw-harness.cjs');
+const { openPopup } = require('./popup-harness.cjs');
+const S = '?sig=ok';
+const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+const top = (md='abc') => ({ frameId: 0, url: 'https://www.skool.com/c/classroom?md='+md, documentId: 'doc-top' });
+const jobDone = (w, id) => w.until(async () => { const j = (await w.jobs()).find((x) => x.id === id); return j && ['done', 'error', 'canceled'].includes(j.status) && j; }, 60000, 'job ' + id);
+const log = (...a) => console.log(...a);
+(async () => {
+  const w = createWorld({ frames: { 1: [top()] } });
+  w.startSW(); await tick();
+  w.events.onCommitted.fire({ tabId: 1, frameId: 0, url: top().url, documentId: 'doc-top', timeStamp: Date.now() - 5000, documentLifecycle: 'active' });
+  await tick();
+  w.req(1, 'https://cdn.test/muxed/master.m3u8' + S);
+  await tick();
+  w.events.onHistoryStateUpdated.fire({ tabId: 1, frameId: 0, url: 'https://www.skool.com/c/classroom?md=def', timeStamp: Date.now() });
+  await tick(50);
+  const p = openPopup(w, { lesson: { number: 2, total: 3 }, tab: { id: 1, url: 'https://www.skool.com/c/classroom?md=def', title: 'Lesson Two - Skool' } });
+  await tick(150);
+  log('count', JSON.stringify(p.byId.count.textContent));
+  log('L2 cards', p.cards().map((c) => { const i = p.cardInfo(c); return i.fname + '|' + i.visible + '|' + i.btn.textContent + '|' + c.textContent; }));
+  await p.cardInfo(p.cards()[0]).btn.click();
+  await tick(1500);
+  log('downloads', w.downloads.map((d) => d.filename + ' <- ' + d.url));
+  process.exit(0);
+})();
