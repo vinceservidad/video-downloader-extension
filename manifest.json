@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "My Video Downloader",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "description": "Detect and download video content you are authorized to save from pages you visit.",
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'"

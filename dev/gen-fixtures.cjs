@@ -41,8 +41,9 @@ const createFFmpegCore = require(path.join(VENDOR, 'ffmpeg-core.js'));
   run(['-i','/w/src.mp4','-map','0:a','-c','copy','-f','hls','-hls_time','2','-hls_playlist_type','vod','-hls_segment_filename','/w/split/a/s%03d.ts','/w/split/a/index.m3u8']);
   FS.writeFile('/w/split/master.m3u8', '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Commentary",DEFAULT=NO,URI="a/missing.m3u8"\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Main",DEFAULT=YES,AUTOSELECT=YES,URI="a/index.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=640x360,AUDIO="aud"\nv/index.m3u8\n');
   // 3) split audio, fMP4
-  mk('fmp4'); mk('fmp4/v'); mk('fmp4/a');
+  mk('fmp4'); mk('fmp4/v'); mk('fmp4/vlo'); mk('fmp4/a');
   run(['-i','/w/src.mp4','-map','0:v','-c','copy','-f','hls','-hls_time','2','-hls_playlist_type','vod','-hls_segment_type','fmp4','-hls_fmp4_init_filename','init.mp4','-hls_segment_filename','/w/fmp4/v/s%03d.m4s','/w/fmp4/v/index.m3u8']);
+  run(['-i','/w/src180.mp4','-map','0:v','-c','copy','-f','hls','-hls_time','2','-hls_playlist_type','vod','-hls_segment_type','fmp4','-hls_fmp4_init_filename','init.mp4','-hls_segment_filename','/w/fmp4/vlo/s%03d.m4s','/w/fmp4/vlo/index.m3u8']);
   run(['-i','/w/src.mp4','-map','0:a','-c','copy','-f','hls','-hls_time','2','-hls_playlist_type','vod','-hls_segment_type','fmp4','-hls_fmp4_init_filename','init.mp4','-hls_segment_filename','/w/fmp4/a/s%03d.m4s','/w/fmp4/a/index.m3u8']);
   FS.writeFile('/w/fmp4/master.m3u8', '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Main",DEFAULT=YES,URI="a/index.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=640x360,AUDIO="aud"\nv/index.m3u8\n');
   // 4) AES-128, muxed TS, explicit IV and implicit (sequence) IV
@@ -91,4 +92,83 @@ function postProcess() {
   // Ladder with an audio-only entry, and a portrait ladder.
   wr('muxed/ladder.m3u8', '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=64000,CODECS="mp4a.40.2"\n../split/a/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=320x180,CODECS="avc1.4d401e,mp4a.40.2"\nlo/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=640x360,CODECS="avc1.4d401e,mp4a.40.2"\nhi/index.m3u8\n');
   wr('muxed/portrait.m3u8', '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=180x320\nlo/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=360x640\nhi/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=720x1280\nmissing/index.m3u8\n');
+
+  // DASH (.mpd) manifests built on the generated fMP4 segments & direct.mp4.
+  const vSegs = fs.readdirSync(P('fmp4/v')).filter((f) => f.endsWith('.m4s')).sort();
+  const aSegs = fs.readdirSync(P('fmp4/a')).filter((f) => f.endsWith('.m4s')).sort();
+  wr('dash/template/manifest.mpd', `<?xml version="1.0" encoding="UTF-8"?>
+<MPD type="static" mediaPresentationDuration="PT${vSegs.length * 2}S">
+  <Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate initialization="../../fmp4/$RepresentationID$/init.mp4" media="../../fmp4/$RepresentationID$/s$Number%03d$.m4s" timescale="1" duration="2" startNumber="0"/>
+      <Representation id="vlo" bandwidth="300000" width="320" height="180" codecs="avc1.4d401e"/>
+      <Representation id="v" bandwidth="1200000" width="640" height="360" codecs="avc1.4d401e"/>
+    </AdaptationSet>
+    <AdaptationSet contentType="audio" mimeType="audio/mp4">
+      <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      <SegmentTemplate initialization="../../fmp4/$RepresentationID$/init.mp4" media="../../fmp4/$RepresentationID$/s$Number%03d$.m4s" timescale="1" duration="2" startNumber="0"/>
+      <Representation id="a" bandwidth="64000" codecs="mp4a.40.2"/>
+    </AdaptationSet>
+  </Period>
+</MPD>`);
+  wr('dash/timeline/manifest.mpd', `<?xml version="1.0" encoding="UTF-8"?>
+<MPD type="static" mediaPresentationDuration="PT8S">
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <SegmentTemplate initialization="../../fmp4/$RepresentationID$/init.mp4" media="../../fmp4/$RepresentationID$/s$Number%03d$.m4s" timescale="1000" startNumber="0">
+        <SegmentTimeline><S t="0" d="2000" r="${vSegs.length - 1}"/></SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="v" bandwidth="1200000" width="640" height="360"/>
+    </AdaptationSet>
+    <AdaptationSet mimeType="audio/mp4">
+      <SegmentTemplate initialization="../../fmp4/$RepresentationID$/init.mp4" media="../../fmp4/$RepresentationID$/s$Number%03d$.m4s" timescale="1000" startNumber="0">
+        <SegmentTimeline><S t="0" d="2000" r="${aSegs.length - 1}"/></SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="a" bandwidth="64000"/>
+    </AdaptationSet>
+  </Period>
+</MPD>`);
+  wr('dash/list/manifest.mpd', `<?xml version="1.0" encoding="UTF-8"?>
+<MPD type="static" mediaPresentationDuration="PT8S">
+  <Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v" bandwidth="1200000" width="640" height="360">
+        <BaseURL>../../fmp4/v/</BaseURL>
+        <SegmentList>
+          <Initialization sourceURL="init.mp4"/>
+          ${vSegs.map((s) => `<SegmentURL media="${s}"/>`).join('\n          ')}
+        </SegmentList>
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet contentType="audio" mimeType="audio/mp4">
+      <Representation id="a" bandwidth="64000">
+        <BaseURL>../../fmp4/a/</BaseURL>
+        <SegmentList>
+          <Initialization sourceURL="init.mp4"/>
+          ${aSegs.map((s) => `<SegmentURL media="${s}"/>`).join('\n          ')}
+        </SegmentList>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`);
+  wr('dash/single/manifest.mpd', `<?xml version="1.0" encoding="UTF-8"?>
+<MPD type="static" mediaPresentationDuration="PT8S">
+  <Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="single" bandwidth="1200000" width="640" height="360">
+        <BaseURL>../../direct.mp4</BaseURL>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`);
+  wr('dash/drm/manifest.mpd', `<?xml version="1.0" encoding="UTF-8"?>
+<MPD type="static" mediaPresentationDuration="PT8S">
+  <Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"/>
+      <SegmentTemplate initialization="../../fmp4/v/init.mp4" media="../../fmp4/v/s$Number%03d$.m4s" timescale="1" duration="2" startNumber="0"/>
+      <Representation id="v" bandwidth="1200000" width="640" height="360"/>
+    </AdaptationSet>
+  </Period>
+</MPD>`);
 }

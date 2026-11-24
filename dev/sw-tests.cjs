@@ -249,16 +249,19 @@ const getJob = async (w, id) => (await w.jobs()).find((x) => x.id === id);
     eq(r.primary.map((c) => c.url), ['https://stream.test/l39/playlist.m3u8'], 'primary');
   });
 
-  await test('unplayed / DASH Loom embed is offered and downloads through the Loom API', async () => {
+  await test('unplayed Loom embed uses placeholder; DASH Loom embed detects manifest and still uses Loom API', async () => {
     const frames = { 1: [topFrame(), { frameId: 5, url: 'https://www.loom.com/embed/' + LOOMID + '?hide_owner=true', documentId: 'doc-l1' }] };
     const w = createWorld({ frames, loomApi: (ep) => (ep === 'raw-url' ? { url: 'https://cdn.test/direct.mp4?sig=ok' } : null) });
     w.startSW(); await tick();
-    w.req(1, 'https://luna.loom.com/id/x/dash/manifest.mpd' + S, { frameId: 5, documentId: 'doc-l1', ct: 'application/dash+xml' });
+    const r0 = await w.popup({ type: 'popup:list', tabId: 1 });
+    eq(r0.primary.map((c) => c.url), [frames[1][1].url], 'unplayed placeholder');
+    const mpd = 'https://luna.loom.com/id/x/dash/manifest.mpd' + S;
+    w.req(1, mpd, { frameId: 5, documentId: 'doc-l1', ct: 'application/dash+xml' });
     w.req(1, 'https://luna.loom.com/id/x/dash/seg-1.m4s' + S, { frameId: 5, documentId: 'doc-l1', ct: 'video/iso.segment' });
     await tick();
     const r = await w.popup({ type: 'popup:list', tabId: 1 });
-    eq(r.primary.map((c) => c.url), [frames[1][1].url], 'placeholder');
-    const res = await baseDl(w, { url: frames[1][1].url });
+    eq(r.primary.map((c) => [c.url, c.kind]), [[mpd, 'dash']], 'dash replaces placeholder');
+    const res = await baseDl(w, { url: mpd, kind: 'dash' });
     const j = await jobDone(w, res.jobId);
     eq([j.status, j.mode], ['done', 'loom-api'], 'job ' + (j.error || ''));
   });
@@ -334,7 +337,7 @@ const getJob = async (w, id) => (await w.jobs()).find((x) => x.id === id);
     const j = await jobDone(w, res.jobId);
     eq(j.status, 'error', 'status');
     ok(/refused access/.test(j.error), 'friendly: ' + j.error);
-    ok(/\(403\)/.test(j.detail) && /off1\.7/.test(j.detail), 'detail: ' + j.detail);
+    ok(/\(403\)/.test(j.detail) && /off1\.\d+/.test(j.detail), 'detail: ' + j.detail);
   });
 
   await test('job orphaned by a crashed offscreen document is failed on next popup open', async () => {
@@ -386,6 +389,21 @@ const getJob = async (w, id) => (await w.jobs()).find((x) => x.id === id);
     ok(acmeRule && acmeRule.action.requestHeaders.find((h) => h.header === 'cookie')?.value === 'acme_sess=tok1', 'page domain cookie attached');
     ok(!rulesSeen.some((r) => r.condition.requestDomains.includes('skool.com')), 'no skool.com rule on non-Skool site');
     ok(!cookieDomains.includes('skool.com'), 'skool.com cookies not read');
+  });
+
+  await test('DASH (.mpd) detected as primary and assembled end-to-end into MP4', async () => {
+    const w = createWorld({ frames: { 1: [topFrame()] } });
+    w.startSW(); await tick();
+    const mpd = 'https://cdn.test/dash/template/manifest.mpd' + S;
+    w.req(1, mpd, { ct: 'application/dash+xml' });
+    w.req(1, 'https://cdn.test/dash/template/seg-1.m4s' + S, { ct: 'video/iso.segment' });
+    await tick();
+    const r = await w.popup({ type: 'popup:list', tabId: 1 });
+    eq(r.primary.map((c) => [c.url, c.kind]), [[mpd, 'dash']], 'dash primary');
+    const res = await baseDl(w, { url: mpd, kind: 'dash', name: '01 - Dash Lesson' });
+    const j = await jobDone(w, res.jobId);
+    eq([j.status, j.mode], ['done', 'dash-av-mux'], 'dash job ' + (j.error || '') + ' ' + (j.detail || ''));
+    eq(w.downloads[0].filename, '/Users/me/Downloads/Course/01 - Dash Lesson.mp4', 'filename');
   });
 
   const failed = results.filter((r) => r[1] !== 'PASS').length;

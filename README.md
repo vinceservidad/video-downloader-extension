@@ -14,9 +14,9 @@ product code, no license/paywall logic.
 
 | Piece | Role |
 |-------|------|
-| `background.js` | Service worker. Sniffs media requests per tab (`.m3u8`, `.mp4`, …, skipping stream segments), keeps detections and download jobs in `chrome.storage.session`, and runs each download as a job. |
+| `background.js` | Service worker. Sniffs media requests per tab (`.m3u8`, `.mpd`, `.mp4`, …, skipping stream segments), keeps detections and download jobs in `chrome.storage.session`, and runs each download as a job. |
 | `content.js` | Scans the page DOM for `<video>`/`<source>` URLs and answers the popup's "which lesson number is this?" question. |
-| `offscreen.js` | Assembles HLS streams: picks the variant for your quality setting plus its audio track, downloads and decrypts segments (AES-128, byte ranges), and remuxes into a proper MP4 with ffmpeg.wasm (`-c copy`, lossless). Jobs run one at a time. |
+| `offscreen.js` | Assembles HLS (`.m3u8`) and unencrypted DASH (`.mpd`) streams: picks the variant for your quality setting plus its audio track, downloads and decrypts segments (AES-128, byte ranges), and remuxes into a proper MP4 with ffmpeg.wasm (`-c copy`, lossless). Jobs run one at a time. |
 | `popup.html` / `popup.js` | Lists detected videos; shows live progress, lets you cancel, and picks up running downloads when reopened. |
 | `generate-icons.js` | Regenerates the toolbar icons (`node generate-icons.js`). |
 
@@ -45,11 +45,12 @@ version, and assembler errors carry a build marker like `[off1.7]`.
 
 ## Limitations
 
-- **DASH (`.mpd`)** streams aren't assembled (detection is skipped).
-- **YouTube** serves adaptive split audio/video streams; this tool won't merge
-  those. Use a dedicated tool like `yt-dlp` for YouTube content you're allowed
-  to download.
-- HLS only supports unencrypted and AES-128 streams (not SAMPLE-AES / DRM).
+- **YouTube** serves adaptive split audio/video streams with rotating player
+  challenges; this tool won't merge those. Use a dedicated tool like `yt-dlp`
+  for YouTube content you're allowed to download.
+- Only unencrypted and AES-128 HLS streams, plus unencrypted VOD DASH (`.mpd`)
+  streams, are supported — DRM (`SAMPLE-AES`, Widevine / `<ContentProtection>`)
+  and live streams are not supported.
 - Merging happens in the browser; ffmpeg.wasm has a 2 GB memory ceiling, so
   very long lessons may need a lower quality setting.
 

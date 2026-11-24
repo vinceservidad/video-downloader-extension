@@ -1,4 +1,4 @@
-// offscreen.js  [off1.7]
+// offscreen.js  [off1.8]
 //
 // Runs in an offscreen document (an extension page): fetch() bypasses CORS for
 // hosts in host_permissions, and URL.createObjectURL / WebCrypto / WebAssembly
@@ -11,13 +11,14 @@
 // separate "offscreen:done" message (which also wakes a terminated worker).
 //
 // Pipeline:
-//   - master playlist -> pick video variant (per quality) + its audio rendition
+//   - HLS master playlist or DASH (.mpd) manifest -> pick video variant (per
+//     quality) + its audio track
 //   - download + decrypt all segments (byte ranges supported) into Blob parts,
 //     so the video never has to sit in the JS heap as one big array
 //   - ffmpeg.wasm `-c copy` into a proper MP4 (inputs mounted via WORKERFS, so
 //     only the output lives in the wasm heap); mux.js / raw fMP4 as fallbacks
 
-const TAG = "[off1.7]";
+const TAG = "[off1.8]";
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Only the service worker (an extension page, not a content script) may drive us.
@@ -256,6 +257,7 @@ async function assemble(job) {
     const blob = await fetchFile(item.url, rep, job.ctrl.signal);
     return { blob, ext: extFromUrl(item.url, ".mp4"), mode: "direct" };
   }
+  if (item.kind === "dash") return assembleDash(item.url, item.quality, rep, job);
   return assembleHls(item.url, item.quality, rep, job);
 }
 
@@ -654,6 +656,272 @@ async function assembleHlsInner(playlistUrl, quality, rep, job, signal) {
   }
 }
 
+// --------------------------------------------------------------- DASH helpers
+function decodeXml(s) {
+  return String(s || "").replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (_, e) => {
+    const k = e.toLowerCase();
+    if (k === "amp") return "&";
+    if (k === "lt") return "<";
+    if (k === "gt") return ">";
+    if (k === "quot") return '"';
+    if (k === "apos") return "'";
+    return String.fromCodePoint(k.startsWith("#x") ? parseInt(k.slice(2), 16) : parseInt(k.slice(1), 10));
+  });
+}
+
+// Minimal XML tree builder (works in both browser and Node test harness).
+function parseXml(xml) {
+  const clean = String(xml || "")
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, (_, c) => c.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"))
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<\?[\s\S]*?\?>/g, "")
+    .replace(/<!DOCTYPE[^>]*>/gi, "");
+  const root = { tag: "#root", attrs: {}, children: [], text: "" };
+  const stack = [root];
+  const tagRe = /<(\/?)([\w:.-]+)([^>]*?)(\/?)>/g;
+  const attrRe = /([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+  let last = 0;
+  let m;
+  while ((m = tagRe.exec(clean))) {
+    if (m.index > last) stack[stack.length - 1].text += decodeXml(clean.slice(last, m.index));
+    last = tagRe.lastIndex;
+    const [, closing, rawTag, rawAttrs, selfClosing] = m;
+    const tag = rawTag.includes(":") ? rawTag.split(":").pop() : rawTag;
+    if (closing) {
+      for (let i = stack.length - 1; i > 0; i--) {
+        if (stack[i].tag === tag) {
+          stack.length = i;
+          break;
+        }
+      }
+      continue;
+    }
+    const attrs = {};
+    let am;
+    while ((am = attrRe.exec(rawAttrs))) {
+      const k = am[1].includes(":") ? am[1].split(":").pop() : am[1];
+      attrs[k] = decodeXml(am[2] ?? am[3] ?? "");
+    }
+    const node = { tag, attrs, children: [], text: "" };
+    stack[stack.length - 1].children.push(node);
+    if (!selfClosing) stack.push(node);
+  }
+  return root.children;
+}
+
+const xmlKids = (node, tag) => (node?.children || []).filter((c) => c.tag === tag);
+const xmlKid = (node, tag) => (node?.children || []).find((c) => c.tag === tag) || null;
+
+function parseIsoDuration(s) {
+  const m = /^P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/i.exec((s || "").trim());
+  if (!m) return 0;
+  return (parseFloat(m[1] || 0) * 86400) + (parseFloat(m[2] || 0) * 3600) + (parseFloat(m[3] || 0) * 60) + parseFloat(m[4] || 0);
+}
+
+function parseDashRange(s) {
+  const m = /^\s*(\d+)\s*-\s*(\d+)\s*$/.exec(s || "");
+  return m ? [parseInt(m[1], 10), parseInt(m[2], 10)] : null;
+}
+
+function expandDashTemplate(tpl, vars) {
+  return String(tpl || "").replace(/\$(?:(\$)|(RepresentationID|Number|Bandwidth|Time)(?:%0(\d+)d)?)\$/g, (_, esc, name, pad) => {
+    if (esc) return "$";
+    const v = String(vars[name] ?? "");
+    return pad ? v.padStart(parseInt(pad, 10), "0") : v;
+  });
+}
+
+function dashBaseUrl(nodes, mpdUrl) {
+  let base = mpdUrl;
+  for (const n of nodes) {
+    const b = xmlKid(n, "BaseURL")?.text.trim();
+    if (b) base = resolveUrl(base, b);
+  }
+  return base;
+}
+
+function dashMime(rep, aset) {
+  return (rep?.attrs.mimeType || aset?.attrs.mimeType || "").toLowerCase();
+}
+
+function dashKind(aset) {
+  const ct = (aset.attrs.contentType || "").toLowerCase();
+  if (ct === "video" || ct === "audio") return ct;
+  const mime = (aset.attrs.mimeType || xmlKid(aset, "Representation")?.attrs.mimeType || "").toLowerCase();
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+  if (aset.attrs.height || aset.attrs.width || xmlKids(aset, "Representation").some((r) => r.attrs.height || r.attrs.width)) return "video";
+  return "";
+}
+
+function hasDrm(nodes) {
+  return nodes.some((n) => xmlKids(n, "ContentProtection").length > 0);
+}
+
+function dashTrackToParsed(rep, aset, period, mpd, mpdUrl, signQuery) {
+  const base = dashBaseUrl([mpd, period, aset, rep], mpdUrl);
+  const id = rep.attrs.id || "";
+  const bw = rep.attrs.bandwidth || "0";
+  const periodDur = parseIsoDuration(period.attrs.duration) || parseIsoDuration(mpd.attrs.mediaPresentationDuration);
+
+  // Merge inherited SegmentTemplate (Period -> AdaptationSet -> Representation).
+  const tpls = [period, aset, rep].map((n) => xmlKid(n, "SegmentTemplate")).filter(Boolean);
+  if (tpls.length) {
+    const attrs = Object.assign({}, ...tpls.map((t) => t.attrs));
+    const timeline = [...tpls].reverse().map((t) => xmlKid(t, "SegmentTimeline")).find(Boolean) || null;
+    const timescale = parseInt(attrs.timescale || "1", 10) || 1;
+    const startNumber = parseInt(attrs.startNumber || "1", 10);
+    const init = attrs.initialization
+      ? { url: applySign(resolveUrl(base, expandDashTemplate(attrs.initialization, { RepresentationID: id, Bandwidth: bw })), signQuery), range: null, key: null }
+      : null;
+    const segments = [];
+    if (timeline) {
+      let num = startNumber;
+      let curT = 0;
+      for (const s of xmlKids(timeline, "S")) {
+        if (s.attrs.t != null) curT = parseInt(s.attrs.t, 10) || 0;
+        const d = parseInt(s.attrs.d || "0", 10) || 0;
+        let r = s.attrs.r != null ? parseInt(s.attrs.r, 10) : 0;
+        if (r < 0 && periodDur > 0 && d > 0) r = Math.max(0, Math.ceil((periodDur * timescale - curT) / d) - 1);
+        for (let k = 0; k <= Math.max(0, r) && segments.length < 20000; k++) {
+          const u = expandDashTemplate(attrs.media, { RepresentationID: id, Bandwidth: bw, Number: num, Time: curT });
+          segments.push({ url: applySign(resolveUrl(base, u), signQuery), range: null, key: null, seq: num });
+          num++;
+          curT += d;
+        }
+      }
+    } else if (attrs.media && attrs.duration) {
+      const dur = parseInt(attrs.duration, 10) || 0;
+      if (!periodDur) throw new Error("Live DASH streams (without a fixed duration) aren't supported.");
+      const count = dur > 0 ? Math.min(20000, Math.ceil(periodDur / (dur / timescale))) : 0;
+      for (let i = 0; i < count; i++) {
+        const num = startNumber + i;
+        const u = expandDashTemplate(attrs.media, { RepresentationID: id, Bandwidth: bw, Number: num, Time: i * dur });
+        segments.push({ url: applySign(resolveUrl(base, u), signQuery), range: null, key: null, seq: num });
+      }
+    }
+    return { segments, init, isFmp4: true };
+  }
+
+  // SegmentList (inherited or on Representation).
+  const lists = [period, aset, rep].map((n) => xmlKid(n, "SegmentList")).filter(Boolean);
+  if (lists.length) {
+    const initEl = [...lists].reverse().map((l) => xmlKid(l, "Initialization")).find(Boolean);
+    const init = initEl?.attrs.sourceURL
+      ? { url: applySign(resolveUrl(base, initEl.attrs.sourceURL), signQuery), range: parseDashRange(initEl.attrs.range), key: null }
+      : null;
+    const segEls = [...lists].reverse().map((l) => xmlKids(l, "SegmentURL")).find((a) => a.length) || [];
+    const segments = segEls.map((el, i) => ({
+      url: applySign(el.attrs.media ? resolveUrl(base, el.attrs.media) : base, signQuery),
+      range: parseDashRange(el.attrs.mediaRange),
+      key: null,
+      seq: i,
+    }));
+    return { segments, init, isFmp4: true };
+  }
+
+  // Single-file Representation (<SegmentBase> or bare <BaseURL>).
+  if (base !== mpdUrl || xmlKid(rep, "BaseURL") || xmlKid(aset, "BaseURL")) {
+    return { segments: [{ url: applySign(base, signQuery), range: null, key: null, seq: 0 }], init: null, isFmp4: true };
+  }
+  return { segments: [], init: null, isFmp4: true };
+}
+
+async function assembleDash(mpdUrl, quality, rep, job) {
+  const inner = new AbortController();
+  const signal = inner.signal;
+  if (job.ctrl.signal.aborted) inner.abort();
+  job.ctrl.signal.addEventListener("abort", () => inner.abort(), { once: true });
+  try {
+    return await assembleDashInner(mpdUrl, quality, rep, job, signal);
+  } finally {
+    inner.abort();
+  }
+}
+
+async function assembleDashInner(mpdUrl, quality, rep, job, signal) {
+  const text = await fetchText(mpdUrl, "Manifest fetch failed", { signal });
+  if (/^\s*(?:<!DOCTYPE\s+html|<html\b)/i.test(text)) throw authError("Manifest fetch failed", "a web page");
+  const mpd = parseXml(text).find((n) => n.tag === "MPD");
+  if (!mpd) throw new Error(`${TAG} Not a DASH manifest`);
+  const signQuery = searchOf(mpdUrl);
+
+  const periods = xmlKids(mpd, "Period");
+  const period = periods.find((p) => xmlKids(p, "AdaptationSet").length) || periods[0];
+  if (!period) throw new Error("No Period found in DASH manifest.");
+
+  const asets = xmlKids(period, "AdaptationSet");
+  const videoVars = [];
+  const audioCands = [];
+  for (const aset of asets) {
+    const kind = dashKind(aset);
+    if (kind !== "video" && kind !== "audio") continue;
+    const isMain = xmlKids(aset, "Role").some((r) => (r.attrs.value || "").toLowerCase() === "main");
+    for (const r of xmlKids(aset, "Representation")) {
+      const bw = parseInt(r.attrs.bandwidth || "0", 10);
+      const w = parseInt(r.attrs.width || aset.attrs.width || "0", 10);
+      const h = parseInt(r.attrs.height || aset.attrs.height || "0", 10);
+      const height = w && h ? Math.min(w, h) : h;
+      const codecs = r.attrs.codecs || aset.attrs.codecs || "";
+      if (kind === "video") videoVars.push({ bw, height, codecs, rep: r, aset });
+      else audioCands.push({ bw, isMain, rep: r, aset });
+    }
+  }
+  const bestV = chooseVariant(videoVars, quality);
+  if (!bestV) throw new Error("No video streams found in DASH manifest.");
+  audioCands.sort((a, b) => Number(b.isMain) - Number(a.isMain) || b.bw - a.bw);
+  const bestA = audioCands[0] || null;
+
+  if (hasDrm([period, bestV.aset, bestV.rep]) || (bestA && hasDrm([bestA.aset, bestA.rep]))) {
+    throw new Error("This stream is DRM-protected (DASH) and can't be saved.");
+  }
+
+  const video = dashTrackToParsed(bestV.rep, bestV.aset, period, mpd, mpdUrl, signQuery);
+  if (!video.segments.length) throw new Error("No video segments found in DASH manifest.");
+  let audio = bestA ? dashTrackToParsed(bestA.rep, bestA.aset, period, mpd, mpdUrl, signQuery) : null;
+  if (audio && !audio.segments.length) audio = null;
+
+  loadFFmpeg().catch(() => {});
+
+  const total = video.segments.length + (video.init ? 1 : 0) + (audio ? audio.segments.length + (audio.init ? 1 : 0) : 0);
+  let done = 0;
+  const tick = () => rep("download", ++done, total);
+  rep("download", 0, total);
+
+  const [videoParts, audioParts] = await Promise.all([
+    fetchStream(video, tick, signal, audio ? 12 : 16),
+    audio ? fetchStream(audio, tick, signal, 6) : null,
+  ]);
+  const vExt = dashMime(bestV.rep, bestV.aset).includes("webm") ? "webm" : "mp4";
+  const aExt = bestA && dashMime(bestA.rep, bestA.aset).includes("webm") ? "webm" : "mp4";
+  const outExt = vExt === "webm" && (!audioParts || aExt === "webm") ? ".webm" : ".mp4";
+
+  if (audioParts) {
+    rep("mux", 0, 100);
+    const out = await ffmpegRemux(
+      job,
+      [
+        { name: "v." + vExt, blob: new Blob(videoParts) },
+        { name: "a." + aExt, blob: new Blob(audioParts) },
+      ],
+      ["-map", "0:v:0", "-map", "1:a:0"],
+      rep,
+      outExt
+    );
+    return { blob: out, ext: outExt, mode: "dash-av-mux" };
+  }
+
+  const whole = new Blob(videoParts);
+  rep("mux", 0, 100);
+  try {
+    const out = await ffmpegRemux(job, [{ name: "v." + vExt, blob: whole }], ["-map", "0:v?", "-map", "0:a?"], rep, outExt);
+    return { blob: out, ext: outExt, mode: "dash-mp4" };
+  } catch (e) {
+    if (signal.aborted) throw e;
+    return { blob: new Blob(videoParts, { type: vExt === "webm" ? "video/webm" : "video/mp4" }), ext: outExt, mode: "dash-raw" };
+  }
+}
+
 // Repackage MPEG-TS into fragmented MP4 with mux.js (no re-encode), one
 // segment at a time so memory stays bounded.
 async function transmuxTsToMp4(parts, signal) {
@@ -738,23 +1006,23 @@ let _ffmpegSeq = 0;
 // Inputs are mounted read-only via WORKERFS (read lazily from the Blobs, not
 // copied into the wasm heap); if that can't mount or the run fails, retry once
 // with the inputs copied into ffmpeg's memory instead.
-async function ffmpegRemux(job, inputs, mapArgs, rep) {
+async function ffmpegRemux(job, inputs, mapArgs, rep, outExt = ".mp4") {
   try {
-    return await ffmpegRemuxOnce(job, inputs, mapArgs, rep, true);
+    return await ffmpegRemuxOnce(job, inputs, mapArgs, rep, true, outExt);
   } catch (e) {
     // Not after a crash (likely out of memory: copying inputs in would make it
     // worse) and not for inputs too big to copy; the callers have lighter fallbacks.
     const size = inputs.reduce((n, i) => n + i.blob.size, 0);
     if (job.ctrl.signal.aborted || !e?.mounted || e.crashed || size > 1 << 30) throw e;
-    return ffmpegRemuxOnce(job, inputs, mapArgs, rep, false);
+    return ffmpegRemuxOnce(job, inputs, mapArgs, rep, false, outExt);
   }
 }
 
-async function ffmpegRemuxOnce(job, inputs, mapArgs, rep, useMount) {
+async function ffmpegRemuxOnce(job, inputs, mapArgs, rep, useMount, outExt = ".mp4") {
   const ff = await loadFFmpeg();
   const n = ++_ffmpegSeq;
   const dir = `/in${n}`;
-  const outPath = `/out${n}.mp4`;
+  const outPath = `/out${n}${outExt}`;
   let mounted = false;
   const written = [];
   try {
@@ -778,7 +1046,9 @@ async function ffmpegRemuxOnce(job, inputs, mapArgs, rep, useMount) {
     _onMuxProgress = (p) => rep("mux", Math.max(0, Math.min(100, Math.round((p || 0) * 100))), 100);
     const args = [];
     for (const i of inputs) args.push("-i", `${dir}/${i.name}`);
-    args.push(...mapArgs, "-c", "copy", "-movflags", "+faststart", outPath);
+    args.push(...mapArgs, "-c", "copy");
+    if (outExt === ".mp4") args.push("-movflags", "+faststart");
+    args.push(outPath);
     let code;
     try {
       code = await ff.exec(args);
@@ -792,7 +1062,7 @@ async function ffmpegRemuxOnce(job, inputs, mapArgs, rep, useMount) {
     const data = await ff.readFile(outPath);
     // Free ffmpeg's copy before the Blob copies ours (the memory peak).
     await ff.deleteFile(outPath).catch(() => {});
-    return new Blob([data], { type: "video/mp4" });
+    return new Blob([data], { type: outExt === ".webm" ? "video/webm" : "video/mp4" });
   } finally {
     _onMuxProgress = null;
     // Best-effort cleanup of the in-memory filesystem (skip if the worker died).

@@ -108,6 +108,7 @@ function isMediaCandidate(url, contentType, reqType, fromDom) {
   if (!fromDom && (SEGMENT_NAME.test(p) || RANGE_QUERY.test(url))) return false;
   // RFC 8216 allows audio/mpegurl for playlists, so check HLS before audio/*.
   if (HLS_EXT.test(p) || /mpegurl/i.test(contentType || "")) return !AUX_PLAYLIST.test(p);
+  if (DASH_EXT.test(p) || /dash\+xml/i.test(contentType || "")) return !AUX_PLAYLIST.test(p);
   if (contentType && SEGMENT_CONTENT_TYPES.test(contentType)) return false;
   if (MEDIA_FILE_EXT.test(p)) return true;
   if (!contentType) return false;
@@ -125,7 +126,7 @@ function isSiblingOfPlaylist(map, url) {
     return false;
   }
   for (const it of map.values()) {
-    if (it.kind !== "hls" || it.stale) continue;
+    if ((it.kind !== "hls" && it.kind !== "dash") || it.stale) continue;
     try {
       const h = new URL(it.url);
       const hdir = h.pathname.slice(0, h.pathname.lastIndexOf("/") + 1);
@@ -139,8 +140,6 @@ function isSiblingOfPlaylist(map, url) {
 function record(tabId, url, { contentType = "", source = "network", frameId, documentId, reqType, at = Date.now() } = {}) {
   if (!isMediaCandidate(url, contentType, reqType, source === "dom")) return;
   const kind = classify(url, contentType);
-  // DASH isn't assembled here; skip to avoid offering a download we can't fulfill.
-  if (kind === "dash") return;
 
   const map = getTabMap(tabId);
   const existing = map.get(url);
@@ -265,7 +264,7 @@ function groupItems(items) {
   const fresh = items.filter((i) => !i.stale);
   const stale = items.filter((i) => i.stale);
   const pick = (list) => {
-    const whole = (i) => i.kind === "hls" && (i.loom || isMaster(i.url));
+    const whole = (i) => i.kind === "dash" || (i.kind === "hls" && (i.loom || isMaster(i.url)));
     const masters = list.filter(whole);
     const variants = list
       .filter((i) => i.kind === "hls" && !whole(i) && !isAudioOnly(i.url))
@@ -583,7 +582,7 @@ async function startJob(msg) {
     pageUrl: msg.pageUrl || "",
     item: {
       url,
-      kind: msg.item.kind === "file" ? "file" : "hls",
+      kind: msg.item.kind === "file" ? "file" : msg.item.kind === "dash" ? "dash" : "hls",
       name: sanitize(msg.item.name),
       documentId: det?.documentId || null,
       loomFrame: !!det?.loom,
@@ -636,11 +635,11 @@ async function runJobSteps(job) {
       await startDownload(job, r.mp4Url, ".mp4");
       return;
     }
-    if (r.hlsUrl) {
-      // Loom returned a signed HLS playlist — assemble it via offscreen (its
+    if (r.hlsUrl || r.dashUrl) {
+      // Loom returned a signed HLS/DASH manifest — assemble it via offscreen (its
       // segments are signed, so no cookies/CORS needed).
-      url = r.hlsUrl;
-      kind = "hls";
+      url = r.hlsUrl || r.dashUrl;
+      kind = r.dashUrl ? "dash" : "hls";
       skipFrame = true;
     } else if (job.item.loomFrame) {
       // The placeholder is the embed page itself; there's nothing else to fetch.
@@ -703,7 +702,7 @@ async function onOffscreenDoneSteps(job, msg) {
   job.offscreenError = msg.error || "Download failed.";
   job.offscreenStatus = msg.httpStatus || 0;
   const authish = msg.httpStatus === 401 || msg.httpStatus === 403 || msg.network || msg.auth;
-  if (authish && !job.skipFrame && !job.frameTried) {
+  if (authish && !job.skipFrame && !job.frameTried && job.assembleKind !== "dash") {
     job.frameTried = true;
     patch(job, { route: "frame", status: "downloading", stage: "download", done: 0, total: 0 }, "now");
     // The frame also reports "frame:done" itself, in case this worker restarts.
@@ -1105,7 +1104,7 @@ async function tryLoomApi(job) {
 
     // Loom's URL may have no file extension: HLS playlists start with #EXTM3U.
     const p = pathOf(r.url);
-    if (DASH_EXT.test(p)) return { error: "loom returned a DASH manifest" };
+    if (DASH_EXT.test(p)) return { dashUrl: r.url };
     if (/\.mp4$/i.test(p)) return { mp4Url: r.url };
     if (HLS_EXT.test(p)) return { hlsUrl: r.url };
     return (await looksLikeHls(r.url)) ? { hlsUrl: r.url } : { mp4Url: r.url };

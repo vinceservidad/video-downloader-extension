@@ -87,7 +87,7 @@ function makeServer(opts = {}) {
     const data = fs.readFileSync(file);
     const headers = new Headers(init.headers || {});
     const range = headers.get('range');
-    const ctype = p.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : p.endsWith('.mp4') ? 'video/mp4' : 'application/octet-stream';
+    const ctype = p.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : p.endsWith('.mpd') ? 'application/dash+xml' : p.endsWith('.mp4') ? 'video/mp4' : 'application/octet-stream';
     if (range && !opts.ignoreRange) {
       const m = /bytes=(\d+)-(\d*)/.exec(range);
       const s = +m[1];

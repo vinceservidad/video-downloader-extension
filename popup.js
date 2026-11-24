@@ -112,7 +112,8 @@ function makeCard(item, { label, recommended, suffix, jobOnly }) {
   const actions = document.createElement("div");
   actions.className = "actions";
   const btn = document.createElement("button");
-  btn.textContent = item.kind === "hls" ? "Download (merge stream)" : "Download";
+  const isStream = item.kind === "hls" || item.kind === "dash";
+  btn.textContent = isStream ? "Download (merge stream)" : "Download";
   const cancel = document.createElement("button");
   cancel.className = "cancel";
   cancel.textContent = "Cancel";
@@ -149,7 +150,7 @@ function makeCard(item, { label, recommended, suffix, jobOnly }) {
         ? "Download again"
         : job.status === "error"
           ? "Try again"
-          : item.kind === "hls"
+          : isStream
             ? "Download (merge stream)"
             : "Download";
     cancel.style.display = active ? "block" : "none";
@@ -240,7 +241,7 @@ function render(res) {
   primary.forEach((item, i) => {
     const earlier = item.role === "earlier";
     add(listEl, item, {
-      label: earlier ? "Earlier on this tab" : item.kind === "hls" ? "Full lesson video" : "Direct file",
+      label: earlier ? "Earlier on this tab" : item.kind === "hls" || item.kind === "dash" ? "Full lesson video" : "Direct file",
       recommended: i === 0 && !earlier,
       suffix: primary.length > 1 ? ` (${i + 1})` : "",
     });

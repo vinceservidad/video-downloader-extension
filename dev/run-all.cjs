@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const node = process.execPath;
 const run = (f) => spawnSync(node, [path.join(__dirname, f)], { encoding: 'utf8', maxBuffer: 64 << 20 });
-if (!fs.existsSync(path.join(__dirname, 'fixtures', 'direct.mp4'))) {
+if (!fs.existsSync(path.join(__dirname, 'fixtures', 'direct.mp4')) || !fs.existsSync(path.join(__dirname, 'fixtures', 'dash', 'template', 'manifest.mpd'))) {
   console.log('Generating fixtures…');
   const g = run('gen-fixtures.cjs');
   if (g.status !== 0) { console.error(g.stdout, g.stderr); process.exit(1); }

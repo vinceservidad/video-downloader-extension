@@ -28,6 +28,13 @@ const CASES = [
   { name: 'sign-in-page-flags-auth', url: 'https://cdn.test/muxed/master.m3u8' + S, server: { htmlOmit: true }, expectError: /sign-in page/, expectAuth: true },
   { name: 'direct-file-sign-in-page', url: 'https://cdn.test/direct.mp4' + S, kind: 'file', server: { htmlOmit: true }, expectError: /sign-in page/, expectAuth: true },
   { name: 'forbidden-403', url: 'https://cdn.test/muxed/master.m3u8' + S, server: { forbid: ['hi/s002.ts'] }, expectError: /403/ },
+  { name: 'dash-template-highest', url: 'https://cdn.test/dash/template/manifest.mpd' + S, kind: 'dash', quality: 'highest', expectMode: 'dash-av-mux', expect: { video: true, audio: true, minDur: 7.5 } },
+  { name: 'dash-template-lowest', url: 'https://cdn.test/dash/template/manifest.mpd' + S, kind: 'dash', quality: 'lowest', expectMode: 'dash-av-mux', expect: { video: true, audio: true, minDur: 7.5 } },
+  { name: 'dash-timeline', url: 'https://cdn.test/dash/timeline/manifest.mpd' + S, kind: 'dash', expectMode: 'dash-av-mux', expect: { video: true, audio: true, minDur: 7.5 } },
+  { name: 'dash-segment-list', url: 'https://cdn.test/dash/list/manifest.mpd' + S, kind: 'dash', expectMode: 'dash-av-mux', expect: { video: true, audio: true, minDur: 7.5 } },
+  { name: 'dash-single-baseurl', url: 'https://cdn.test/dash/single/manifest.mpd' + S, kind: 'dash', expectMode: 'dash-mp4', expect: { video: true, audio: true, minDur: 7.5 } },
+  { name: 'dash-drm-rejected', url: 'https://cdn.test/dash/drm/manifest.mpd' + S, kind: 'dash', expectError: /DRM-protected/ },
+  { name: 'dash-sign-in-page', url: 'https://cdn.test/dash/template/manifest.mpd' + S, kind: 'dash', server: { htmlOmit: true }, expectError: /sign-in page/, expectAuth: true },
 ];
 const only = process.argv[2];
 (async () => {
